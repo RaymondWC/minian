@@ -46,14 +46,30 @@ except:
     print("cannot use cuda accelerate")
 
 
-def norm_params(param):
+# def load_params(param):
+#     try:
+#         param = ast.literal_eval(param)
+#     except (ValueError, SyntaxError):
+#         pass
+#     try:
+#         if re.search(r'^slice\([0-9]+, *[0-9]+ *,*[0-9]*\)$', param):
+#             param = eval(param)
+#     except TypeError:
+#         pass
+#     if type(param) is dict:
+#         param = {k: load_params(v) for k, v in param.items()}
+#     return param
+
+
+def load_params(param):
     try:
-        param = ast.literal_eval(param)
-    except (ValueError, SyntaxError):
+        param = eval(param)
+    except:
         pass
     if type(param) is dict:
-        param = {k: norm_params(v) for k, v in param.items()}
+        param = {k: load_params(v) for k, v in param.items()}
     return param
+
 
 def load_videos(vpath,
                 pattern='msCam[0-9]+\.avi$',
@@ -143,7 +159,8 @@ def load_avi_perframe(fname, fid):
     cap.set(cv2.CAP_PROP_POS_FRAMES, fid)
     ret, fm = cap.read()
     if ret:
-        return cv2.cvtColor(fm, cv2.COLOR_RGB2GRAY)
+        return np.flip(
+            cv2.cvtColor(fm, cv2.COLOR_RGB2GRAY), axis=0)
     else:
         print("frame read failed for frame {}".format(fid))
         return fm
@@ -610,13 +627,14 @@ def open_minian(dpath, fname='minian', backend='netcdf', chunks=None, post_proce
     if backend is 'netcdf':
         fname = fname + '.nc'
         if chunks is 'auto':
-            mpath = pjoin(dpath, fname)
-            with xr.open_dataset(mpath) as ds:
-                dims = ds.dims
-            chunks = dict([(d, 'auto') for d in dims])
-            ds = xr.open_dataset(os.path.join(dpath, fname), chunks=chunks)
-            if post_process:
-                ds = post_process(ds, mpath)
+            chunks = dict([(d, 'auto') for d in ds.dims])
+        mpath = pjoin(dpath, fname)
+        with xr.open_dataset(mpath) as ds:
+            dims = ds.dims
+        chunks = dict([(d, 'auto') for d in dims])
+        ds = xr.open_dataset(os.path.join(dpath, fname), chunks=chunks)
+        if post_process:
+            ds = post_process(ds, mpath)
         return ds
     elif backend is 'zarr':
         mpath = pjoin(dpath, fname)
