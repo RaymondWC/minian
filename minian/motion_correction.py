@@ -600,8 +600,12 @@ def normcorre_wrapper(varr_ref, pw_rigid=False, max_shifts=(5, 5), gSig_filt=(3,
     # img_name, out_fname, idxs, shape_mov, template, strides, overlaps, max_shifts,\
     #     add_to_movie, max_deviation_rigid, upsample_factor_grid, newoverlaps, newstrides, \
     #     shifts_opencv, nonneg_movie, gSig_filt, is_fiji, use_cuda, border_nan, var_name_hdf5 = params
+    if not pw_rigid:
+        strides=None
+        overlaps=None
+        max_deviation_rigid=0
 
-    template = np.nanmedian(varr_ref, axis=0)
+    template = high_pass_filter_space(np.nanmedian(varr_ref, axis=0), gSig_filt)
     shift_info = []
     # imgs = cm.load(img_name, subindices=idxs)
     mc = np.zeros(varr_ref.shape, dtype=np.float32)
@@ -624,7 +628,7 @@ def normcorre_wrapper(varr_ref, pw_rigid=False, max_shifts=(5, 5), gSig_filt=(3,
     #         mc.astype(np.float32), (len(imgs), -1), order='F').T + bias
     new_temp = np.nanmean(mc, 0)
     new_temp[np.isnan(new_temp)] = np.nanmin(new_temp)
-    return shift_info, mc, new_temp
+    return mc, shift_info, new_temp
 
 
 def tile_and_correct(img, template, strides, overlaps, max_shifts, newoverlaps=None, newstrides=None,
