@@ -22,7 +22,8 @@ from IPython.core.display import display, HTML
 from dask.distributed import Client, progress, LocalCluster, fire_and_forget
 
 minian_path = r'C:\Users\William Mau\Documents\GitHub\minian'
-dpath = r"C:\Users\William Mau\Documents\GitHub\minian\demo_movies"
+#dpath = r"C:\Users\William Mau\Documents\GitHub\minian\demo_movies"
+dpath = r"C:\Users\William Mau\Documents\Projects\Cai lab\minian\Videos"
 chunks = {"frame": 1000, "height": 50, "width": 50, "unit_id": 100}
 subset = None
 subset_mc = None
@@ -183,7 +184,7 @@ if in_memory:
 shifts = res.sel(variable = ['height', 'width'])
 corr = res.sel(variable='corr')
 
-# Apply shifts
+#Apply shifts
 varr_mc = apply_shifts(varr_ref, shifts)
 varr_mc = varr_mc.ffill('height').bfill('height').ffill('width').bfill('width')
 if in_memory:
@@ -201,23 +202,66 @@ varr_nce_pw, _, _ = normcorre_wrapper(np.asarray(varr_ref), **param_normcorre_pw
 varr_ref = np.asarray(varr_ref)
 varr_mc = np.asarray(varr_mc)
 
-import matplotlib.animation as animation
 from pylab import tight_layout
+
+raw_max = varr_ref.max(axis=0)
+mc_max = varr_mc.max(axis=0)
+rigid_max = varr_nce_rig.max(axis=0)
+pw_max = varr_nce_pw.max(axis=0)
+
+fig_max, ax_max = plt.subplots(2,2)
+tight_layout()
+ax_max[0,0].imshow(raw_max, vmin=-7, vmax=50)
+ax_max[0,0].set_title('Raw')
+
+ax_max[0,1].imshow(mc_max, vmin=-7, vmax=50)
+ax_max[0,1].set_title('minian')
+
+ax_max[1,0].imshow(rigid_max, vmin=-7, vmax=50)
+ax_max[1,0].set_title('NoRMCorre, rigid')
+
+ax_max[1,1].imshow(pw_max, vmin=-7, vmax=50)
+ax_max[1,1].set_title('NoRMCorre, piecewise')
+
+[axi.set_axis_off() for axi in ax_max.ravel()]
+
+fig_diff, ax_diff = plt.subplots(3,2)
+tight_layout()
+ax_diff[0,0].imshow(raw_max - mc_max, vmin=-3, vmax=3)
+ax_diff[0,0].set_title('Raw minus minian-mc')
+
+ax_diff[1,0].imshow(raw_max - rigid_max, vmin=-3, vmax=3)
+ax_diff[1,0].set_title('Raw minus NoRMCorre, rigid')
+
+ax_diff[2,0].imshow(raw_max - pw_max, vmin=-3, vmax=3)
+ax_diff[2,0].set_title('Raw minus NoRMCorre, piecewise')
+
+ax_diff[1,1].imshow(mc_max - rigid_max, vmin=-3, vmax=3)
+ax_diff[1,1].set_title('minian-mc minus NoRMCorre, rigid')
+
+ax_diff[2,1].imshow(mc_max - pw_max, vmin=-3, vmax=3)
+ax_diff[2,1].set_title('minian-mc minus NoRMCorre, piecewise')
+
+ax_diff[0,1].set_axis_off()
+
+[axi.set_axis_off() for axi in ax_diff.ravel()]
+
+import matplotlib.animation as animation
 fig, ax = plt.subplots(2,2)
 tight_layout()
 
 ims = []
 for raw_frame, mc_frame, nce_frame, nce_pw_frame in zip(varr_ref, varr_mc, varr_nce_rig, varr_nce_pw):
-    raw = ax[0,0].imshow(raw_frame, animated=True)
+    raw = ax[0,0].imshow(raw_frame, cmap='grey', animated=True)
     ax[0,0].set_title('Raw')
 
-    mc = ax[0,1].imshow(mc_frame, animated=True)
+    mc = ax[0,1].imshow(mc_frame, cmap='grey', animated=True)
     ax[0,1].set_title('minian')
 
-    nce_rig = ax[1,0].imshow(nce_frame, animated=True)
+    nce_rig = ax[1,0].imshow(nce_frame, cmap='grey', animated=True)
     ax[1,0].set_title('NoRMCorre, rigid')
 
-    nce_pw = ax[1,1].imshow(nce_pw_frame, animated=True)
+    nce_pw = ax[1,1].imshow(nce_pw_frame, cmap='grey', animated=True)
     ax[1,1].set_title('NoRMCorre, piecewise')
 
     [axi.set_axis_off() for axi in ax.ravel()]
