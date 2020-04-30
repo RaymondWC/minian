@@ -29,7 +29,7 @@ def seeds_init(varr, wnd_size=500, method='rolling', stp_size=200, nchunk=100, m
     nfm = len(idx_fm)
     if method == 'rolling':
         nstp = np.ceil(nfm / stp_size) + 1
-        centers = np.linspace(0, nfm - 1, nstp)
+        centers = np.linspace(0, nfm - 1, int(nstp))
         hwnd = np.ceil(wnd_size / 2)
         max_idx = list(
             map(lambda c: slice(int(np.floor(c - hwnd).clip(0)), int(np.ceil(c + hwnd))),
@@ -248,7 +248,7 @@ def seeds_merge(varr, seeds, thres_dist=5, thres_corr=0.6, noise_freq='envelope'
             varr_sub = smooth_sig(varr_sub, noise_freq)
     corr = (xr.apply_ufunc(
         da.corrcoef,
-        varr_sub.chunk(dict(spatial=50, frame=-1)),
+        varr_sub.chunk(dict(spatial='auto', frame=-1)),
         input_core_dims=[['spatial', 'frame']],
         output_core_dims=[['sampleA', 'sampleB']],
         dask='allowed',
@@ -293,8 +293,8 @@ def initialize(varr, seeds, thres_corr=0.8, wnd=10, noise_freq=None):
     print("initializing backgrounds")
     A = A.reindex_like(varr.isel(frame=0)).fillna(0)
     chk = {d: c for d, c in zip(varr.dims, varr.chunks)}
-    uchkA = get_optimal_chk(A)['unit_id']
-    uchkC = get_optimal_chk(C)['unit_id']
+    uchkA = get_optimal_chk(varr, A)['unit_id']
+    uchkC = get_optimal_chk(varr, C)['unit_id']
     uchk = min(uchkA, uchkC)
     A = A.chunk(dict(height=chk['height'], width=chk['width'], unit_id=uchk))
     C = C.chunk(dict(frame=chk['frame'], unit_id=uchk))

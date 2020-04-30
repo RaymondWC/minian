@@ -7,6 +7,7 @@ import dask.array.fft as dafft
 import dask.array.linalg as dalin
 import dask.array as darr
 import functools as fct
+import cv2
 # import dask_ml.joblib
 from dask import delayed, compute
 from dask.diagnostics import Profiler
@@ -18,7 +19,7 @@ from scipy.sparse import diags, dia_matrix
 from scipy.linalg import toeplitz, lstsq
 from scipy.spatial.distance import pdist, squareform
 from sklearn.linear_model import LassoLars
-from sklearn.externals.joblib import parallel_backend
+from sklearn.utils import parallel_backend
 from numba import jit, guvectorize
 from skimage import morphology as moph
 from statsmodels.tsa.stattools import acovf
@@ -159,7 +160,8 @@ def update_spatial(Y,
                    update_background=True,
                    post_scal=False,
                    normalize=True,
-                   zero_thres='eps'):
+                   zero_thres='eps',
+                   sched='single-threaded'):
     _T = len(Y.coords['frame'])
     print("estimating penalty parameter")
     cct = C.dot(C, 'frame')
@@ -169,54 +171,55 @@ def update_spatial(Y,
     if dl_wnd:
         selem = moph.disk(dl_wnd)
         sub = xr.apply_ufunc(
-            moph.dilation,
-            A.fillna(0).chunk(dict(height=-1, width=-1)),
+            cv2.dilate,
+            A.chunk(dict(height=-1, width=-1)),
             input_core_dims=[['height', 'width']],
             output_core_dims=[['height', 'width']],
             vectorize=True,
-            kwargs=dict(selem=selem),
+            kwargs=dict(kernel=selem),
             dask='parallelized',
             output_dtypes=[A.dtype])
         sub = (sub > 0)
     else:
         sub = xr.apply_ufunc(np.ones_like, A.compute())
-    sub = sub.compute().astype(bool).transpose(*A.dims).chunk(A.chunks)
     if update_background:
         A = xr.concat([A, b.assign_coords(unit_id=-1)], 'unit_id')
         b_erd = xr.apply_ufunc(
-            moph.erosion,
+            cv2.erode,
             b.chunk(dict(height=-1, width=-1)),
             input_core_dims=[['height', 'width']],
             output_core_dims=[['height', 'width']],
-            kwargs=dict(selem=selem),
+            kwargs=dict(kernel=selem),
             dask='parallelized',
             output_dtypes=[b.dtype])
         sub = xr.concat([
             sub, (b_erd > 0).astype(bool).assign_coords(unit_id=-1)],
                         'unit_id')
         C = xr.concat([C, f.assign_coords(unit_id=-1)], 'unit_id')
+    sub = sub.persist()
     print("fitting spatial matrix")
-    gu_update = darr.gufunc(
-        fct.partial(
-            update_spatial_perpx,
-            C=C.transpose('frame', 'unit_id').values),
-        signature="(f),(),(u)->(u)",
-        output_dtypes=A.dtype,
-        vectorize=True)
     A_new = xr.apply_ufunc(
-        gu_update,
+        update_spatial_perpx,
         Y.chunk(dict(frame=-1)),
         alpha,
         sub.chunk(dict(unit_id=-1)),
-        input_core_dims=[['frame'], [], ['unit_id']],
+        C.chunk(dict(frame=-1, unit_id=-1)),
+        input_core_dims=[['frame'], [], ['unit_id'], ['frame', 'unit_id']],
         output_core_dims=[['unit_id']],
-        dask='allowed')
-    A_new = A_new.persist()
+        vectorize=True,
+        dask='parallelized',
+        output_dtypes=[Y.dtype])
+    try:
+        with parallel_backend('dask'):
+            A_new = A_new.persist()
+    except ValueError:
+        with da.config.set(scheduler=sched):
+            A_new = A_new.persist()
     print("removing empty units")
     if zero_thres == 'eps':
         zero_thres = np.finfo(A_new.dtype).eps
     A_new = A_new.where(A_new > zero_thres).fillna(0)
-    non_empty = A_new.sum(['width', 'height']) > 0
+    non_empty = (A_new.sum(['width', 'height']) > 0).compute()
     A_new = A_new.where(non_empty, drop=True)
     C_new = C.where(non_empty, drop=True)
     A_new = rechunk_like(A_new, A).persist()
@@ -389,10 +392,11 @@ def update_temporal(Y,
                     compute=True,
                     normalize=True,
                     post_scal=True,
-                    scs_fallback=False):
+                    scs_fallback=False,
+                    sched='processes'):
     print("grouping overlaping units")
-    A_pos = (A > 0).astype(int)
-    A_neg = (A == 0).astype(int)
+    A_pos = (A > 0).astype(float)
+    A_neg = (A == 0).astype(float)
     A_inter = xr.apply_ufunc(
         da.array.tensordot,
         A_pos,
@@ -492,7 +496,7 @@ def update_temporal(Y,
     if compute:
         g = g.persist()
     print("updating isolated temporal components")
-    if use_spatial is 'full':
+    if use_spatial == 'full':
         result_iso = xr.apply_ufunc(
             update_temporal_cvxpy,
             Y_flt.chunk(dict(spatial=-1, frame=-1)),
@@ -530,7 +534,7 @@ def update_temporal(Y,
             output_core_dims=[['trace', 'frame']],
             dask='allowed')
     if compute:
-        with da.config.set(scheduler='processes'):
+        with da.config.set(scheduler=sched):
             result_iso = result_iso.compute()
     print("updating overlapping temporal components")
     res_list = []
@@ -575,7 +579,7 @@ def update_temporal(Y,
                     output_dtypes=[YrA.dtype])
                 res_list.append(cur_res)
         if compute:
-            with da.config.set(scheduler='processes'):
+            with da.config.set(scheduler=sched):
                 result_ovlp, = da.compute(res_list)
                 result = (xr.concat(result_ovlp + [result_iso], 'unit_id')
                           .sortby('unit_id').drop('unit_labels'))
@@ -635,7 +639,7 @@ def update_temporal(Y,
 
 
 def get_ar_coef(y, sn, p, add_lag, pad=None):
-    if add_lag is 'p':
+    if add_lag == 'p':
         max_lag = p * 2
     else:
         max_lag = p + add_lag
@@ -761,7 +765,7 @@ def update_temporal_cvxpy(y, g, sn, A=None, **kwargs):
                     "problem status is {}, returning null".format(prob.status),
                     RuntimeWarning)
                 return np.full((5, c.shape[0], c.shape[1]), np.nan).squeeze()
-    if not prob.status is 'optimal':
+    if not (prob.status == 'optimal'):
         warnings.warn("problem solved sub-optimally", RuntimeWarning)
     try:
         return np.stack(

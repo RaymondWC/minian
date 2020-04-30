@@ -7,9 +7,10 @@ import pyfftw.interfaces.numpy_fft as npfft
 import numba as nb
 import dask.array as darr
 from scipy.stats import zscore
-from scipy.ndimage import center_of_mass
+from scipy.ndimage import center_of_mass, label
 from collections import OrderedDict
 from skimage import transform as tf
+from skimage.morphology import disk
 from scipy.stats import zscore
 from dask import delayed, compute
 from dask.diagnostics import ProgressBar
@@ -355,59 +356,6 @@ def apply_translation(img, shift):
     return np.roll(img, shift, axis=(1, 0))
 
 
-def estimate_shift_fft(varr, dim='frame', on='max', max_shift=15):
-    varr = varr.chunk(dict(height=-1, width=-1))
-    dims = list(varr.dims)
-    dims.remove(dim)
-    sizes = [varr.sizes[d] for d in ['height', 'width']]
-    pad_s = (np.array(sizes) * 2).astype(int)
-
-    def truncate(fm, w):
-        return np.pad(fm[w:-w, w:-w], w)
-
-    if on == 'mean':
-        print("computing mean frame")
-        onfm = varr.mean(dim).compute()
-    elif on == 'max':
-        print("computing max frame")
-        onfm = varr.max(dim).compute()
-    elif on == 'first':
-        onfm = varr.isel({dim: 0}).compute()
-    elif on == 'last':
-        onfm = varr.isel({dim: -1}).compute()
-    else:
-        try:
-            onfm = varr.sel({dim: on}).compute()
-        except KeyError:
-            raise ValueError("template {} not understood".format(on))
-    onfm = xr.apply_ufunc(
-        truncate,
-        onfm,
-        input_core_dims=[['height', 'width']],
-        output_core_dims=[['height', 'width']],
-        kwargs=dict(w=max_shift)).chunk()
-    src_fft = xr.apply_ufunc(
-        darr.fft.fft2,
-        onfm,
-        input_core_dims=[['height', 'width']],
-        output_core_dims=[['height_pad', 'width_pad']],
-        dask='allowed',
-        kwargs=dict(s=pad_s)).persist()
-    print("estimating shifts")
-    res = xr.apply_ufunc(
-        shift_fft,
-        src_fft,
-        varr,
-        input_core_dims=[['height_pad', 'width_pad'], ['height', 'width']],
-        output_core_dims=[['variable']],
-        vectorize=True,
-        dask='parallelized',
-        output_dtypes=[float],
-        output_sizes=dict(variable=3))
-    res = res.assign_coords(variable=['height', 'width', 'corr'])
-    return res
-
-
 def mask_shifts(varr_fft, corr, shifts, z_thres, perframe=True, pad_f=1):
     dims = list(varr_fft.dims)
     dims.remove('frame')
@@ -430,29 +378,94 @@ def mask_shifts(varr_fft, corr, shifts, z_thres, perframe=True, pad_f=1):
                 last_good = gb_diff[gb_diff < 0].max() + cur_bad
                 cur_src = varr_fft.sel(frame=last_good)
                 cur_dst = varr_fft.sel(frame=next_good)
-                res = shift_fft(cur_src, cur_dst, pad_s, pad_f)
-                shifts.loc[dict(frame=next_good.values)] = res[0:2]
+                res = match_temp(cur_src, cur_dst, pad_s, pad_f)
+                shifts.loc[dict(frame=next_good.values)] = res
             except (KeyError, ValueError):
                 print("unable to correct for bad frame: {}".format(int(cur_bad)))
     return shifts, mask
 
 
-def shift_fft(fft_src, fft_dst):
-    if not np.iscomplexobj(fft_src):
-        fft_src = np.fft.fft2(fft_src, np.array(fft_src.shape) * 2)
-    if not np.iscomplexobj(fft_dst):
-        fft_dst = np.fft.fft2(fft_dst, np.array(fft_dst.shape) * 2)
-    if np.isnan(fft_src).any() or np.isnan(fft_dst).any():
-        return np.array([0, 0, np.nan])
-    dims = fft_dst.shape
-    prod = fft_src * np.conj(fft_dst)
-    iprod = np.fft.ifft2(prod)
-    iprod_sh = np.fft.fftshift(iprod)
-    cor = iprod_sh.real
-    max_sh = np.unravel_index(np.argmax(cor), cor.shape)
-    sh = max_sh - np.ceil(np.array(dims) / 2.0)
-    corr = np.max(cor)
-    return np.concatenate([sh, corr], axis=None)
+def estimate_shifts(varr, max_sh, dim="frame", npart=3, local=False):
+    varr = varr.chunk({"height": -1, "width": -1})
+    vmax, sh = xr.apply_ufunc(
+        est_sh_part,
+        varr,
+        input_core_dims=[[dim, "height", "width"]],
+        output_core_dims=[["height", "width"], [dim, "variable"]],
+        dask="allowed",
+        kwargs={"max_sh": max_sh, "npart": npart, "local": local},
+    )
+    return sh.assign_coords(variable=["height", "width"])
+
+
+def est_sh_part(varr, max_sh, npart, local):
+    if varr.shape[0] <= 1:
+        return varr.squeeze(), np.array([[0, 0]])
+    idx_spt = np.array_split(np.arange(varr.shape[0]), npart)
+    fm_ls, sh_ls = [], []
+    for idx in idx_spt:
+        if len(idx) > 0:
+            fm, sh = est_sh_part(varr[idx, :, :], max_sh, npart, local)
+            fm_ls.append(fm)
+            sh_ls.append(sh)
+    mid = int(len(sh_ls) / 2)
+    sh_add_ls = [np.array([0, 0])] * len(sh_ls)
+    for i, fm in enumerate(fm_ls):
+        if i < mid:
+            temp = fm_ls[i + 1]
+            sh_idx = np.arange(i + 1)
+        elif i > mid:
+            temp = fm_ls[i - 1]
+            sh_idx = np.arange(i, len(sh_ls))
+        else:
+            continue
+        sh_add = darr.from_delayed(
+            delayed(match_temp)(fm, temp, max_sh, local), (2,), float
+        )
+        for j in sh_idx:
+            sh_ls[j] = sh_ls[j] + sh_add.reshape((1, -1))
+            sh_add_ls[j] = sh_add_ls[j] + sh_add
+    for i, (fm, sh) in enumerate(zip(fm_ls, sh_add_ls)):
+        fm_ls[i] = darr.nan_to_num(
+            darr.from_delayed(delayed(shift_perframe)(fm, sh), fm.shape, fm.dtype)
+        )
+    sh_ret = darr.concatenate(sh_ls)
+    fm_ret = darr.stack(fm_ls)
+    return fm_ret.max(axis=0), sh_ret
+
+
+def match_temp(src, dst, max_sh, local, subpixel=False):
+    src = np.pad(src, max_sh)
+    cor = cv2.matchTemplate(
+        src.astype(np.float32), dst.astype(np.float32), cv2.TM_CCOEFF_NORMED)
+    if not len(np.unique(cor)) > 1:
+        return np.array([0, 0])
+    cent = np.floor(np.array(cor.shape) / 2)
+    if local:
+        cor_ma = cv2.dilate(cor, np.ones((3, 3)))
+        maxs = np.array(np.nonzero(cor_ma == cor))
+        dev = ((maxs - cent[:, np.newaxis]) ** 2).sum(axis=0)
+        imax = maxs[:, np.argmin(dev)]
+    else:
+        imax = np.unravel_index(np.argmax(cor), cor.shape)
+    if subpixel:
+        x0 = np.arange(max(imax[0] - 5, 0), min(imax[0] + 6, cor.shape[0]))
+        x1 = np.arange(max(imax[1] - 5, 0), min(imax[1] + 6, cor.shape[1]))
+        y0 = cor[x0, imax[1]]
+        y1 = cor[imax[0], x1]
+        p0 = np.polyfit(x0, y0, 2)
+        p1 = np.polyfit(x1, y1, 2)
+        imax = np.array([
+            -0.5 * p0[1] / p0[0],
+            -0.5 * p1[1] / p1[0]
+        ])
+        # m0 = np.roots(np.polyder(p0))
+        # m1 = np.roots(np.polyder(p1))
+        # m0 = m0[np.argmin(np.abs(m0 - imax[0]))]
+        # m1 = m1[np.argmin(np.abs(m1 - imax[1]))]
+        # imax = np.array([m0, m1])
+    sh = cent - imax
+    return sh
 
 
 def apply_shifts(varr, shifts):
@@ -467,6 +480,17 @@ def apply_shifts(varr, shifts):
         dask = 'parallelized',
         output_dtypes = [varr.dtype])
     return varr_sh
+
+
+def mser_thres(fm):
+    mser = cv2.MSER_create(_min_area=100, _delta=1, _max_variation=2)
+    reg, _ = mser.detectRegions(fm.T)
+    reg_set = [set(tuple(crd) for crd in r) for r in reg]
+    fm_thres = np.zeros_like(fm)
+    if reg_set:
+        reg = np.array(list(set.union(*reg_set)))
+        fm_thres[reg[:, 0], reg[:, 1]] = fm[reg[:, 0], reg[:, 1]]
+    return fm_thres
 
 
 def shift_perframe(fm, sh):

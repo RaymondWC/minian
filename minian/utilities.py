@@ -116,7 +116,7 @@ def load_videos(vpath,
     print("loading {} videos in folder {}".format(len(vlist), vpath))
 
     file_extension = os.path.splitext(vlist[0])[1]
-    if file_extension == '.avi':
+    if file_extension in ('.avi', '.mkv'):
         movie_load_func = load_avi_lazy
     elif file_extension == '.tif':
         movie_load_func = load_tif_lazy
@@ -150,12 +150,12 @@ def load_videos(vpath,
     return varr
 
 def load_tif_lazy(fname):
-    with TiffFile(fname) as tif:
-        data = tif.asarray()
+    data = TiffFile(fname)
+    f = len(data.pages)
 
-    f = int(data.shape[0])
     fmread = da.delayed(load_tif_perframe)
     flist = [fmread(fname, i) for i in range(f)]
+
     sample = flist[0].compute()
     arr = [da.array.from_delayed(
         fm, dtype=sample.dtype, shape=sample.shape) for fm in flist]
@@ -736,8 +736,9 @@ def save_minian(var, dpath, fname='minian', backend='netcdf', meta_dict=None, ov
         return ds
     elif backend is 'zarr':
         md = {True: 'w', False: 'w-'}[overwrite]
-        ds.to_zarr(os.path.join(dpath, fname, var.name + '.zarr'), mode=md)
-        return ds
+        fp = os.path.join(dpath, fname, var.name + '.zarr')
+        ds.to_zarr(fp, mode=md)
+        return xr.open_zarr(fp)[var.name]
     else:
         raise NotImplementedError("backend {} not supported".format(backend))
 
@@ -817,12 +818,21 @@ def rechunk_like(x, y):
         return x.compute()
 
 
-def get_optimal_chk(arr, dim_grp=None, ncores='auto', mem_limit='auto'):
+def get_optimal_chk(ref, arr=None, dim_grp=None, ncores='auto', mem_limit='auto'):
+    if arr is None:
+        arr = ref
+    szs = ref.sizes
     if ncores=='auto':
         ncores = psutil.cpu_count()
     if mem_limit=='auto':
-        mem_limit = (psutil.virtual_memory().available / 1024 ** 2)
-    csize = min(int(np.floor(mem_limit/ncores/3)), 1024)
+        mem_limit = (psutil.virtual_memory().available / (1024 ** 2))
+    tempsz = 1000*(3*szs['height'] * szs['width'] + 7 * szs['frame']) * ref.dtype.itemsize / (1024 ** 2)
+    csize = min(int(np.floor((mem_limit - tempsz) / ncores / 4)), 1024)
+    if csize <= 0:
+        warnings.warn(
+            "estimated memory limit is smaller than 0. Using 64MiB chunksize instead. "
+            "Make sure you have enough memory or manually set mem_limit")
+        csize = 64
     dims = arr.dims
     if not dim_grp:
         dim_grp = [(d,) for d in dims]
