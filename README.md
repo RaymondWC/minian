@@ -1,3 +1,6 @@
+[![Build Status](https://img.shields.io/travis/DeniseCaiLab/minian/master.svg?style=flat)](https://travis-ci.org/DeniseCaiLab/minian)
+[![codecov](https://codecov.io/gh/DeniseCaiLab/minian/branch/master/graph/badge.svg)](https://codecov.io/gh/DeniseCaiLab/minian)
+
 # About MiniAn
 
 MiniAn is an analysis pipeline and visualization tool inspired by both [CaImAn](https://github.com/flatironinstitute/CaImAn) and [MIN1PIPE](https://github.com/JinghaoLu/MIN1PIPE) package specifically for [Miniscope](http://miniscope.org/index.php/Main_Page) data.
